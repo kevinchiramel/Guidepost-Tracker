@@ -511,7 +511,7 @@ main { padding: 0 0 calc(40px + var(--safe-bottom)); }
   .month-budget-input::placeholder { color: var(--rule); }
 }
 
-.desktop-week { display: none; }
+.desktop-week { display: block; }
 .mobile-week  { display: none; }
 
 </style>
@@ -674,9 +674,9 @@ let currentMonthIdx=new Date().getMonth();
 // ── Period nav ────────────────────────────────────────────────────────
 
 function renderPeriodNav(){
-  // Mobile
-  document.getElementById('mobile-period-text').textContent =
-    currentView==='week' ? weekLabel(ALL_WEEKS[currentWeekIdx]) : MONTH_NAMES[currentMonthIdx];
+  // Mobile period text (only present on mobile, skip if absent)
+  const mpt=document.getElementById('mobile-period-text');
+  if(mpt) mpt.textContent = currentView==='week' ? weekLabel(ALL_WEEKS[currentWeekIdx]) : MONTH_NAMES[currentMonthIdx];
 
   // Desktop
   const list=document.getElementById('period-list');
