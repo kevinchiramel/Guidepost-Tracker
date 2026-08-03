@@ -80,6 +80,26 @@ header .spacer { flex: 1; }
 .period-bar-desktop { display: none; }
 .period-bar { display: none; }
 
+/* mobile import/export */
+.mobile-data-btns {
+  display: flex;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.mobile-data-btn {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.3px;
+  background: rgba(255,255,255,0.10);
+  border: 1px solid rgba(255,255,255,0.18);
+  color: rgba(245,240,232,0.8);
+  padding: 6px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  min-height: 32px;
+  white-space: nowrap;
+}
+
 /* ── Mobile date bar ── */
 .mobile-datebar {
   background: var(--paper);
@@ -371,6 +391,7 @@ main { padding: 0 0 calc(40px + var(--safe-bottom)); }
 
   /* show desktop controls */
   .view-toggle { display: flex; gap: 2px; background: rgba(255,255,255,0.08); border-radius: 6px; padding: 3px; }
+  .mobile-data-btns { display: none; }
   .view-toggle button {
     font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.5px;
     background: none; border: none; color: var(--ink-faint);
@@ -522,11 +543,17 @@ main { padding: 0 0 calc(40px + var(--safe-bottom)); }
   <h1>Guidepost Tracker</h1>
   <span class="year">2026</span>
   <div class="spacer"></div>
+  <!-- Mobile import/export -->
+  <div class="mobile-data-btns">
+    <button class="mobile-data-btn" onclick="exportData()">↓ Export</button>
+    <button class="mobile-data-btn" onclick="triggerImport()">↑ Import</button>
+  </div>
+  <!-- Desktop import/export + view toggle -->
   <div class="data-btns">
     <button class="data-btn" onclick="exportData()" title="Export all entries as JSON">↓ Export</button>
     <button class="data-btn" onclick="triggerImport()" title="Import entries from JSON">↑ Import</button>
-    <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importData(event)">
   </div>
+  <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importData(event)">
   <div class="view-toggle">
     <button id="btn-week" class="active" onclick="setView('week')">WEEK</button>
     <button id="btn-month" onclick="setView('month')">MONTH</button>
@@ -605,9 +632,109 @@ const GUIDEPOSTS = [
 ];
 
 const STORAGE_KEY = 'guidepost_tracker_2026';
-function loadData(){ try{ return JSON.parse(localStorage.getItem(STORAGE_KEY))||{}; }catch{ return {}; } }
-function saveData(d){ localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); }
-let entries = loadData();
+
+// ── GitHub sync config ────────────────────────────────────────────────
+// Open this file in a text editor and replace the placeholder below
+// with your GitHub personal access token (repo scope).
+const GH_TOKEN  = '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';
+const GH_OWNER  = 'kevinchiramel';
+const GH_REPO   = 'Guidepost-Tracker';
+const GH_FILE   = 'data.json';
+const GH_API    = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_FILE}`;
+
+let entries = {};
+let ghFileSha = null;   // needed for updates
+let syncPending = false;
+let syncTimer = null;
+
+// ── Local fallback ────────────────────────────────────────────────────
+function loadLocal(){ try{ return JSON.parse(localStorage.getItem(STORAGE_KEY))||{}; }catch{ return {}; } }
+function saveLocal(d){ localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); }
+
+// ── GitHub read ───────────────────────────────────────────────────────
+async function loadFromGitHub(){
+  showSyncStatus('syncing');
+  try {
+    const res = await fetch(GH_API, {
+      headers: { Authorization: `token ${GH_TOKEN}`, Accept: 'application/vnd.github.v3+json' }
+    });
+    if(res.status === 404){
+      // File doesn't exist yet — start fresh or use local data
+      entries = loadLocal();
+      showSyncStatus('ok');
+      return;
+    }
+    if(!res.ok) throw new Error(`GitHub ${res.status}`);
+    const json = await res.json();
+    ghFileSha = json.sha;
+    const decoded = JSON.parse(atob(json.content.replace(/\n/g,'')));
+    // Merge: GitHub wins (it's the source of truth)
+    entries = decoded;
+    saveLocal(entries);
+    showSyncStatus('ok');
+  } catch(e) {
+    console.warn('GitHub load failed, using local:', e);
+    entries = loadLocal();
+    showSyncStatus('offline');
+  }
+}
+
+// ── GitHub write ──────────────────────────────────────────────────────
+async function saveToGitHub(){
+  syncPending = false;
+  showSyncStatus('syncing');
+  try {
+    const content = btoa(unescape(encodeURIComponent(JSON.stringify(entries, null, 2))));
+    const body = {
+      message: `sync: ${new Date().toISOString().slice(0,16)}`,
+      content,
+      ...(ghFileSha ? { sha: ghFileSha } : {})
+    };
+    const res = await fetch(GH_API, {
+      method: 'PUT',
+      headers: {
+        Authorization: `token ${GH_TOKEN}`,
+        Accept: 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+    if(!res.ok) throw new Error(`GitHub ${res.status}`);
+    const json = await res.json();
+    ghFileSha = json.content.sha;
+    showSyncStatus('ok');
+  } catch(e) {
+    console.warn('GitHub save failed:', e);
+    showSyncStatus('offline');
+  }
+}
+
+// Debounce writes — wait 1.5s after last change before committing
+function saveData(d){
+  entries = d;
+  saveLocal(d);
+  syncPending = true;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(saveToGitHub, 1500);
+}
+
+// ── Sync status indicator ─────────────────────────────────────────────
+function showSyncStatus(state){
+  let el = document.getElementById('sync-dot');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'sync-dot';
+    Object.assign(el.style, {
+      position:'fixed', bottom:'16px', right:'16px',
+      width:'8px', height:'8px', borderRadius:'50%',
+      zIndex:'500', transition:'background 0.4s',
+      boxShadow:'0 1px 4px rgba(0,0,0,.2)'
+    });
+    document.body.appendChild(el);
+  }
+  el.style.background = state==='ok' ? '#4a7c6f' : state==='syncing' ? '#b5853a' : '#c04040';
+  el.title = state==='ok' ? 'Synced' : state==='syncing' ? 'Saving…' : 'Offline — saved locally';
+}
 
 // checkbox: entries[dateStr]['H'] = true/false
 function getCheckbox(dateStr, gpId){ return !!(entries[dateStr]&&entries[dateStr][gpId]===true); }
@@ -1133,7 +1260,18 @@ function escHtml(s){
 }
 
 // ── Init ──────────────────────────────────────────────────────────────
-renderAll();
+(async () => {
+  await loadFromGitHub();
+  renderAll();
+})();
+
+// Re-sync when tab becomes visible (switching back from another device)
+document.addEventListener('visibilitychange', async () => {
+  if(document.visibilityState === 'visible' && !syncPending){
+    await loadFromGitHub();
+    renderAll();
+  }
+});
 </script>
 </body>
 </html>
